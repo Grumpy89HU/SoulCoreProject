@@ -1,13 +1,37 @@
 import uvicorn
-import os, sys, signal, time, traceback, json
+import os, sys, signal, time, traceback, json, asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from core.kernel import Kernel
 from core.logger import get_logger
+from core.ollama_core import discover_models_loop 
+from contextlib import asynccontextmanager
 
 log = get_logger("api")
-app = FastAPI(title="LÉLEK CORE API")
+
+# --- STARTUP & SHUTDOWN (LIFESPAN) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP: Itt indul a háttérfolyamat
+    log.info("SoulCore API (Lifespan) indul... Háttérfolyamatok aktiválása.")
+    discovery_task = asyncio.create_task(discover_models_loop())
+    log.info("Ollama Discovery háttérfolyamat aktív.")
+    
+    yield  # Itt fut az API kiszolgálása
+
+    # SHUTDOWN: Itt áll le tisztán minden
+    log.info("Leállás... Háttérfolyamatok lezárása.")
+    discovery_task.cancel()
+    try:
+        await discovery_task
+    except asyncio.CancelledError:
+        pass
+
+# A FastAPI példányosítása a Lifespan handler-rel
+app = FastAPI(title="LÉLEK CORE API", lifespan=lifespan)
+
+# A Kernelt globálisan példányosítjuk
 kernel = Kernel("config")
 
 app.add_middleware(
@@ -21,7 +45,7 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    return {"status": "online", "model": "lelek-core-v1"}
+    return {"status": "online", "model": "lelek-core-v1", "identity": "Origó"}
 
 @app.get("/v1/models")
 async def list_models():
@@ -95,7 +119,7 @@ async def reload_config():
 @app.post("/system/restart")
 async def restart_system():
     log.info("Rendszer újraindítása...")
-    os.execv(sys.executable, ['python3'] + sys.argv)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 @app.post("/system/stop")
 async def stop_system():
