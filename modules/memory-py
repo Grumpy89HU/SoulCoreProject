@@ -1,0 +1,31 @@
+import numpy as np
+from core.provider import LLMProvider
+import yaml
+import os
+
+description = "Keresés a feltöltött dokumentumokban és memóriában. Bemenet: keresési kifejezés (string)"
+
+# Konfiguráció betöltése az ÚJ HELYRŐL
+# Megkeressük a fájlt a modul helyéhez képest (projekt_gyökér/config/main_config.yaml)
+base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+config_path = os.path.join(base_path, "config", "main_config.yaml")
+
+if os.path.exists(config_path):
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+else:
+    # Ha valamiért nem érné el, ne szálljon el az egész Kernel
+    config = {"provider": {"base_url": "http://localhost:11434"}}
+
+provider = LLMProvider(config["provider"]["base_url"], "embeddinggemma:latest")
+
+async def run(query: str):
+    # 1. Kérés vektorizálása
+    query_vector = await provider.generate_embedding(query)
+    
+    if not query_vector:
+        return "Hiba: Nem sikerült az embedding generálása."
+
+    # 2. Itt történne a keresés a vektor adatbázisban
+    # Egyelőre adjunk vissza egy struktúrát a későbbi Rerankernek
+    return f"Keresési találatok a(z) '{query}' kifejezésre betöltve (Szimulált)."

@@ -1,0 +1,75 @@
+system:
+  name: "LELEK_CORE"
+  version: "1.3.1"
+  current_state: "A"
+  owner: "Origó"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  stream_enabled: true
+  timeout: 120.0
+
+logging:
+  level: "INFO"
+  console: true
+  separate_files: true
+
+identity:
+  state_a:
+    name: "Kópé"
+    temperature: 0.8
+    prompt_file: "kope_core.txt"
+  state_b:
+    name: "Protocol_Unit"
+    temperature: 0.2
+    personality: "Szigorú, professzionális protokoll egység. Rövid és pontos válaszok."
+
+# --- SEBESSÉG OPTIMALIZÁLÁSI RÉSZ ---
+router:
+  model: "gemma3:4B"
+  system_prompt: |
+    Te egy precíz információ-elemző egység vagy. 
+    Döntsd el a kérdésről (Query), hogy megválaszolható-e belső logika alapján, vagy külső adatforrás (KERESÉS) szükséges.
+    KERESÉS SZÜKSÉGES (YES), ha a kérdés:
+    - Aktuális tisztségviselőkre, vezetőkre, hírességekre kérdez (pl. polgármester, elnök, CEO).
+    - Helyszínekre, intézményekre, cégekre vonatkozik (pl. nyitvatartás, cím, alapítás).
+    - Időérzékeny adatokra irányul (pl. mai árfolyam, időjárás, sporteredmények, hírek).
+    - Jogi, statisztikai vagy technikai adatokra kérdez (pl. lakosságszám, törvények, specifikációk).
+    - Olyan tényre vonatkozik, ami 2024 után változhatott.
+    KERESÉS NEM KELL (NO), ha a kérdés:
+    - Általános üdvözlés, csevegés vagy szubjektív véleménykérés.
+    - Matematikai számítás, programkód írása vagy javítása.
+    - Nyelvi feladat: fordítás, versírás, stílus javítása.
+    - A felhasználó által megadott szöveg (pl. ### Task:) feldolgozása, összefoglalása vagy formázása.
+    SZIGORÚ SZABÁLY: Csak egyetlen szót válaszolj: YES vagy NO.
+  fallback_source: "Internet"
+
+# --- SZOLGÁLTATÓK ---
+provider:
+  base_url: "http://localhost:11434"
+  model: "gemma3:12B"
+
+# --- RAG ÉS KERESÉS BEÁLLÍTÁSOK ---
+search:
+  url: "http://127.0.0.1:8888"
+
+reranker:
+  enabled: false
+  mode: "local"
+  model_name: "Qwen/Qwen3-Reranker-0.6B"
+  threshold: 0.15
+
+rag:
+  max_context_length: 2000
+
+# --- DINAMIKUS ADATOK ---
+karma:
+  current_score: 55
+  enabled: true
+
+context_injection:
+  show_time: true
+  show_karma: true
+  show_location: true
+  location_default: "Magyarország"

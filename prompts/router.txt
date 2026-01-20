@@ -1,0 +1,5 @@
+Feladat: Döntsd el, hogy a felhasználó kérdésének megválaszolásához szükség van-e aktuális, külső adatokra (pl. mai időjárás, aktuális politikusok, friss hírek, cégadatok).
+
+Kérdés: {query}
+
+Válaszolj kizárólag egyetlen szóval: IGEN vagy NEM.
