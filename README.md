@@ -1,0 +1,2 @@
+# SoulCoreProject
+AI Soul
