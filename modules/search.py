@@ -3,9 +3,10 @@ import urllib.parse
 import re
 import asyncio
 import hashlib
+import json  # <-- EZ KELL A JSON.DUMPS-HOZ
 from bs4 import BeautifulSoup
 from core.logger import get_logger
-from core.database import DBManager  # Most már a database.py-t használjuk
+from core.database import DBManager 
 
 log = get_logger("module_search")
 
@@ -27,20 +28,20 @@ async def scrape_url(client, url):
 async def execute(query: str, config: dict = None):
     db = DBManager()
     
-    # 1. Query tisztítás és Hash (Origó: A redundancia kiszűrése)
+    # 1. Query tisztítás és Hash
     q = query.lower()
     q = re.sub(r"^(szia|üdv|helló|mondd meg|keress rá)[\s,]*", "", q).strip()
     if not q: return []
     
     query_hash = hashlib.md5(q.encode()).hexdigest()
 
-    # 2. Cache ellenőrzés (12 órás ablak)
+    # 2. Cache ellenőrzés a DBManageren keresztül (NINCS SQL ITT)
     cached_data = db.get_cached_search(query_hash)
     if cached_data:
         log.info(f"CACHE TALÁLAT: '{q}' adatai az adatbázisból betöltve.")
         return cached_data
 
-    # 3. Ha nincs cache: SearXNG + Scrape
+    # 3. Keresés indítása
     search_cfg = config.get("search", {}) if config else {}
     base_url = search_cfg.get("url", "http://127.0.0.1:8888")
     
@@ -57,13 +58,11 @@ async def execute(query: str, config: dict = None):
             raw_results = response.json().get("results", [])[:3]
             if not raw_results: return []
 
-            # Scrape indítása a top találatokra
             scrape_tasks = [scrape_url(client, r.get("url")) for r in raw_results]
             scraped_data = await asyncio.gather(*scrape_tasks)
 
             formatted_results = []
             for i, r in enumerate(raw_results):
-                # Ha a scrape sikeres volt, azt használjuk, ha nem, a snippetet
                 content = scraped_data[i] if (i < len(scraped_data) and scraped_data[i]) else r.get("content", "")
                 formatted_results.append({
                     "title": r.get("title", "Cím nélkül"),
@@ -71,8 +70,8 @@ async def execute(query: str, config: dict = None):
                     "content": content
                 })
             
-            # 4. Mentés az adatbázisba jövőbeli használatra
-            db.save_search(query_hash, q, formatted_results)
+            # 4. Mentés az adatbázisba (Javított változónévvel: formatted_results)
+            db.save_search_to_cache(query_hash, q, json.dumps(formatted_results))
             log.info(f"Keresés kész. Eredmények 12 órára cache-elve.")
             
             return formatted_results 

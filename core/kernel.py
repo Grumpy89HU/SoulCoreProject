@@ -23,10 +23,10 @@ class Kernel:
         rerank_cfg = cfg.get("reranker", {})
         self.reranker = Reranker(rerank_cfg) if rerank_cfg.get("enabled") else None
         self.modules = load_modules()
-        self.log.info("Kernel v1.5 (Origó + Jegyzetelő funkció) aktív.")
+        self.log.info("Kernel v1.5 (Origó + Unified Memory) aktív.")
 
     async def process_message(self, user_message: str, conv_id: str = "default_session"):
-        """Teljes feldolgozási lánc + ÖNREFLEXIÓ."""
+        """Teljes feldolgozási lánc + Memória beolvasás + Önreflexió."""
         start_time = time.time()
         module_result = None
 
@@ -55,10 +55,21 @@ class Kernel:
                     else:
                         module_result = self._simple_combine(search_results)
 
-        # 3. Szintézis
-        response = await self.generate_final_response(user_message, module_result, conv_id)
+        # --- MEMÓRIA ÉS JEGYZETEK ELŐKÉSZÍTÉSE ---
+        # Itt olvassuk ki az adatokat a DB-ből
+        current_notes = self.db.get_notes_for_conversation(conv_id)
+        global_memories = self.db.get_long_term_memories()
+        
+        # 3. Szintézis (Átadjuk a plusz infókat a generálónak)
+        response = await self.generate_final_response(
+            user_message, 
+            module_result, 
+            conv_id, 
+            notes=current_notes, 
+            memories=global_memories
+        )
 
-        # 4. ÖNREFLEXIÓ - Csak ha NEM meta-feladat és NEM üres
+        # 4. ÖNREFLEXIÓ - Csak ha NEM meta-feladat
         if not is_task:
             self.log.info(f"Érdemi beszélgetés észlelve, önreflexió indítása...")
             asyncio.create_task(self._self_reflection(user_message, response, conv_id))
@@ -68,30 +79,34 @@ class Kernel:
         self.log.debug(f"Kész. Idő: {time.time() - start_time:.2f}s")
         return response
 
-    async def generate_final_response(self, user_message: str, module_result: dict, conv_id: str):
-        """Identitás + Jegyzetek visszatöltése + RAG."""
+    async def generate_final_response(self, user_message: str, module_result: dict, conv_id: str, notes=None, memories=None):
+        """Identitás + Jegyzetek + Memória + RAG összeillesztése."""
         base_identity = self.state_manager.assemble_system_prompt()
-        model_name = self.state_manager.config["provider"]["model"]
         
-        # Jegyzetek leolvasása a falról
-        past_notes = self.db.get_notes_for_model(conv_id, model_name)
+        # 1. JEGYZETEK (Rövidtávú - az aktuális conv_id-hoz)
         note_context = ""
-        if past_notes:
-            note_context = "\n--- SAJÁT JEGYZETEID (A JEGYZETTÖMBÖDBŐL) ---\n"
-            for topic, content in past_notes:
+        if notes:
+            note_context = "\n--- SAJÁT JEGYZETEID (EBBŐL A BESZÉLGETÉSBŐL) ---\n"
+            for topic, content in notes:
                 note_context += f"📌 {topic}: {content}\n"
             note_context += "--- JEGYZETEK VÉGE ---\n"
 
-        # Szigorúbb instruálás a jegyzetek használatára
-        instruction = "\nFONTOS: A fenti SAJÁT JEGYZETEK a legfrissebb tények. Használd őket elsődleges forrásként!"
-        
+        # 2. HOSSZÚTÁVÚ MEMÓRIA (Minden beszélgetésnél látszik)
+        memory_context = ""
+        if memories:
+            memory_context = "\n--- HOSSZÚTÁVÚ ISMERETEK RÓLAD ---\n"
+            for subject, predicate, obj in memories:
+                memory_context += f"💡 {subject} {predicate}: {obj}\n"
+            memory_context += "--- MEMÓRIA VÉGE ---\n"
 
-        full_system_prompt = f"{base_identity}\n{note_context}\n{instruction}"
-        full_system_prompt += "\nKözlési stílus: Tömör, precíz, adatvezérelt. Kerüld a metaforákat."
-        
+        # Szigorú instruálás
+        instruction = "\nFONTOS: A SAJÁT JEGYZETEK és a HOSSZÚTÁVÚ ISMERETEK a legfrissebb tények. Használd őket elsődleges forrásként!"
+        style = "\nKözlési stílus: Tömör, precíz, adatvezérelt. Kerüld a metaforákat."
+
+        full_system_prompt = f"{base_identity}\n{memory_context}\n{note_context}\n{instruction}\n{style}"
 
         if module_result:
-            full_system_prompt += f"\n--- KÜLSŐ KONTEXTUS ---\n{module_result['context']}\n"
+            full_system_prompt += f"\n--- KÜLSŐ KONTEXTUS (INTERNET) ---\n{module_result['context']}\n"
 
         return await self.provider.generate_response(
             user_message, 
@@ -100,27 +115,26 @@ class Kernel:
         )
 
     async def _self_reflection(self, user_msg: str, assistant_res: str, conv_id: str):
+        """Kinyeri a tényeket a válaszból és menti a jegyzettömbbe."""
         try:
             model_name = self.state_manager.config["provider"]["model"]
-            # Kicsit szigorúbb prompt, hogy tiszta listát kapjunk
-            # Módosított prompt a kernel.py-ban:
             reflection_prompt = (
                 "### TASK: EXTRACT TECHNICAL FACTS ONLY\n"
-                "Extract parameters, error codes, and hard rules from the text.\n"
-                "IGNORE metaphors, jokes, and conversational filler.\n"
+                "Extract parameters, names, times, and hard facts from the conversation.\n"
+                "IGNORE metaphors, emotions, and filler.\n"
                 "FORMAT: Topic: Value\n"
-                "STRICT RULE: Only output the list. No intro, no outro."
+                "STRICT RULE: Only output the list. No intro."
             )
             context = f"User: {user_msg}\nAI: {assistant_res}"
             
             reflection = await self.router_provider.generate_response(context, system_prompt=reflection_prompt, temp=0.1)
-            # 1. Beolvassuk a már meglévő jegyzeteket a szűréshez
-            past_notes = self.db.get_notes_for_model(conv_id, model_name)
+            
+            # Meglévő jegyzetek a duplikáció elkerüléséhez
+            past_notes = self.db.get_notes_for_conversation(conv_id)
             existing_contents = [c.strip() for t, c in past_notes] if past_notes else []
 
             for line in reflection.split('\n'):
-                # Csak akkor foglalkozunk a sorral, ha van benne kettőspont
-                if ":" in line and len(line) > 10:
+                if ":" in line and len(line) > 5:
                     clean_line = re.sub(r'^[* \-\d.]+', '', line)
                     parts = clean_line.split(":", 1)
                     
@@ -128,7 +142,6 @@ class Kernel:
                         topic_tag = parts[0].strip()[:50]
                         content = parts[1].strip()
 
-                        # 2. ELLENŐRZÉS: Csak akkor mentünk, ha ez az információ még nincs meg
                         if content not in existing_contents:
                             self.db.add_short_term_note(
                                 conv_id=conv_id, 
@@ -136,13 +149,8 @@ class Kernel:
                                 topic_tag=topic_tag, 
                                 content=content
                             )
-                            self.log.info(f"Új adat rögzítve: {topic_tag}")
-                            # Frissítjük a listát, hogy egy válaszon belül se legyen duplikáció
                             existing_contents.append(content) 
-                        else:
-                            self.log.debug(f"Adat már ismert, rögzítés kihagyva: {topic_tag}")
             
-            self.log.info(f"Reflexió szűrve és rögzítve a(z) {conv_id} csőhöz.")
         except Exception as e:
             self.log.error(f"Reflexió hiba: {e}")
 
@@ -153,7 +161,6 @@ class Kernel:
         return {"context": ctx, "source": "Web"}
 
     async def rerank_results(self, query: str, search_results: list):
-        """A találatok intelligens pontozása."""
         rag_cfg = self.state_manager.config.get("rag", {})
         threshold = rag_cfg.get("threshold", 0.15)
         passed_contents = []
@@ -162,7 +169,6 @@ class Kernel:
         for i, res in enumerate(search_results):
             content = res.get('content', '')
             title = res.get('title', 'Weboldal')
-            # A reranker dönti el, mennyire releváns a szöveg a kérdéshez
             score = self.reranker.get_local_score(query, f"{title} {content}")
             
             if score >= threshold:
