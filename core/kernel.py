@@ -16,34 +16,65 @@ class Kernel:
         self.db = DBManager()
         
         cfg = self.state_manager.config
+        # Fő modell (Kópé - 12B)
         self.provider = LLMProvider(cfg["provider"]["base_url"], cfg["provider"]["model"])
+        
+        # Kisegítő modell (RAG Cleaner / Router / Írnok - 1B)
         router_model = cfg.get("router", {}).get("model", cfg["provider"]["model"])
-        self.router_provider = LLMProvider(cfg["provider"]["base_url"], router_model)
+        self.small_provider = LLMProvider(cfg["provider"]["base_url"], router_model)
         
         rerank_cfg = cfg.get("reranker", {})
         self.reranker = Reranker(rerank_cfg) if rerank_cfg.get("enabled") else None
         self.modules = load_modules()
-        self.log.info("Kernel v1.5 (Origó + Unified Memory) aktív.")
+        self.log.info("Kernel v1.5.5 (SoulCore: Search Gatekeeper & Character Shield) aktív.")
+
+    async def should_trigger_search(self, user_message: str) -> bool:
+        """
+        Belső döntéshozatali logika: megvizsgálja, hogy a lekérdezés megválaszolható-e 
+        belső tudás (adminisztratív rövidítések) alapján, vagy szükséges-e a web.
+        """
+        decision_prompt = (
+            "Internal Reasoning Engine: Analyze the following Hungarian query.\n"
+            f"Query: \"{user_message}\"\n\n"
+            "Task: Decide if external search is MANDATORY.\n"
+            "- If it contains administrative shortcuts like 'an:', 'szül:', 'hrsz:', 'cgj:', 'lh:', the answer is INTERNAL (No search).\n"
+            "- If it is a greeting or identity question, the answer is INTERNAL.\n"
+            "- If it requires real-time facts (weather, current news, stock prices), the answer is SEARCH.\n"
+            "Output ONLY '[SEARCH]' or '[INTERNAL]'."
+        )
+        
+        try:
+            decision = await self.small_provider.generate_response(
+                decision_prompt, 
+                system_prompt="You are a Search Decision Logic unit.", 
+                temp=0.1
+            )
+            return "[SEARCH]" in decision.upper()
+        except Exception as e:
+            self.log.error(f"Search Decision hiba: {e}")
+            return True # Hiba esetén inkább keressünk, hogy ne legyen infóhiány
 
     async def process_message(self, user_message: str, conv_id: str = "default_session"):
-        """Teljes feldolgozási lánc + Memória beolvasás + Önreflexió."""
         start_time = time.time()
         module_result = None
+        
+        # --- 1. RADIKÁLIS SZŰRÉS (Hard-coded & AI-döntés) ---
+        msg_lower = user_message.lower().strip()
+        
+        identity_terms = ["ki vagy", "mi a neved", "hogy hívnak", "neved", "ki beszél", "szia", "helló", "hogy vagy"]
+        meta_terms = ["### task:", "follow-up", "generate", "címjavaslat", "suggest"]
+        
+        is_identity = any(t in msg_lower for t in identity_terms)
+        is_meta = any(t in msg_lower for t in meta_terms)
+        is_too_short = len(msg_lower.split()) < 3
+        
+        needs_search = False
+        
+        # Ha nem egyértelműen meta/identitás, megkérdezzük a logikai egységet
+        if not is_identity and not is_meta and not is_too_short:
+            needs_search = await self.should_trigger_search(user_message)
 
-        # Ellenőrizzük, hogy belső meta-feladatról van-e szó
-        is_task = user_message.strip().startswith("###") or "### task:" in user_message.lower()
-
-        # 1. Router döntés
-        needs_search = True
-        try:
-            router_sys = self.state_manager.config["router"]["system_prompt"]
-            decision = await self.router_provider.generate_response(f"Query: {user_message}", system_prompt=router_sys, temp=0.1)
-            if "NO" in decision.strip().upper()[:10]:
-                needs_search = False
-        except Exception as e:
-            self.log.error(f"Router hiba: {e}")
-
-        # 2. Keresés / RAG
+        # --- 2. KERESÉS VÉGREHAJTÁSA ---
         if needs_search:
             search_mod = self.modules.get("search")
             if search_mod:
@@ -54,130 +85,99 @@ class Kernel:
                         module_result = await self.rerank_results(user_message, search_results)
                     else:
                         module_result = self._simple_combine(search_results)
+        else:
+            self.log.info("Keresés átugorva: Belső tudás vagy identitás-ág.")
 
-        # --- MEMÓRIA ÉS JEGYZETEK ELŐKÉSZÍTÉSE ---
-        # Itt olvassuk ki az adatokat a DB-ből
+        # --- 3. KONTEXTUS ÉS BELSŐ ADATOK ---
         current_notes = self.db.get_notes_for_conversation(conv_id)
         global_memories = self.db.get_long_term_memories()
         
-        # 3. Szintézis (Átadjuk a plusz infókat a generálónak)
+        heartbeat_query = "SELECT raw_content FROM internal_thought_logs WHERE priority_level >= 1 ORDER BY id DESC LIMIT 3"
+        raw_thoughts = self.db._execute(heartbeat_query, fetch_all=True)
+        internal_thoughts = [t[0] for t in raw_thoughts] if raw_thoughts else []
+        
+        # --- 4. GENERÁLÁS ---
         response = await self.generate_final_response(
             user_message, 
             module_result, 
             conv_id, 
             notes=current_notes, 
-            memories=global_memories
+            memories=global_memories, 
+            internal_thoughts=internal_thoughts
         )
 
-        # 4. ÖNREFLEXIÓ - Csak ha NEM meta-feladat
-        if not is_task:
-            self.log.info(f"Érdemi beszélgetés észlelve, önreflexió indítása...")
-            asyncio.create_task(self._self_reflection(user_message, response, conv_id))
-        else:
-            self.log.debug("Meta-feladat észlelve, önreflexió kihagyva.")
+        # --- 5. AUDIT ---
+        if not is_meta:
+            asyncio.create_task(self._scribe_audit(user_message, response, conv_id))
 
-        self.log.debug(f"Kész. Idő: {time.time() - start_time:.2f}s")
+        self.log.info(f"Kész. Keresés: {needs_search} | Identitás-ág: {is_identity} | Idő: {time.time() - start_time:.2f}s")
         return response
 
-    async def generate_final_response(self, user_message: str, module_result: dict, conv_id: str, notes=None, memories=None):
-        """Identitás + Jegyzetek + Memória + RAG összeillesztése."""
-        base_identity = self.state_manager.assemble_system_prompt()
+    async def generate_final_response(self, user_message: str, module_result: dict, conv_id: str, 
+                                    notes=None, memories=None, internal_thoughts=None):
         
-        # 1. JEGYZETEK (Rövidtávú - az aktuális conv_id-hoz)
-        note_context = ""
-        if notes:
-            note_context = "\n--- SAJÁT JEGYZETEID (EBBŐL A BESZÉLGETÉSBŐL) ---\n"
-            for topic, content in notes:
-                note_context += f"📌 {topic}: {content}\n"
-            note_context += "--- JEGYZETEK VÉGE ---\n"
+        cleaned_context = ""
+        # RAG Tisztítás
+        if module_result and module_result.get('context'):
+            try:
+                cleaner_prompt = self.state_manager.get_rag_preprocessor_prompt()
+                cleaned_context = await self.small_provider.generate_response(
+                    f"INPUT DATA:\n{module_result['context']}", 
+                    system_prompt=cleaner_prompt, 
+                    temp=0.1
+                )
+            except Exception as e:
+                self.log.error(f"Cleaner hiba: {e}")
+                cleaned_context = module_result['context']
 
-        # 2. HOSSZÚTÁVÚ MEMÓRIA (Minden beszélgetésnél látszik)
-        memory_context = ""
-        if memories:
-            memory_context = "\n--- HOSSZÚTÁVÚ ISMERETEK RÓLAD ---\n"
-            for subject, predicate, obj in memories:
-                memory_context += f"💡 {subject} {predicate}: {obj}\n"
-            memory_context += "--- MEMÓRIA VÉGE ---\n"
-
-        # Szigorú instruálás
-        instruction = "\nFONTOS: A SAJÁT JEGYZETEK és a HOSSZÚTÁVÚ ISMERETEK a legfrissebb tények. Használd őket elsődleges forrásként!"
-        style = "\nKözlési stílus: Tömör, precíz, adatvezérelt. Kerüld a metaforákat."
-
-        full_system_prompt = f"{base_identity}\n{memory_context}\n{note_context}\n{instruction}\n{style}"
-
-        if module_result:
-            full_system_prompt += f"\n--- KÜLSŐ KONTEXTUS (INTERNET) ---\n{module_result['context']}\n"
+        model_name = self.state_manager.config["provider"]["model"]
+        full_system_prompt = self.state_manager.assemble_kope_system_prompt(
+            model_name=model_name, 
+            cleaned_context=cleaned_context
+        )
+        
+        extras = []
+        if memories: extras.append(f"Hosszútávú emlékek: {memories}")
+        if notes: extras.append(f"Beszélgetési jegyzetek: {notes}")
+        if internal_thoughts: extras.append(f"Rendszer reflexiók: {internal_thoughts}")
+        
+        if extras:
+            full_system_prompt += "\n\n### RELEVÁNS BELSŐ INFORMÁCIÓK (Csak ha szükséges):\n" + "\n".join(extras)
 
         return await self.provider.generate_response(
             user_message, 
             system_prompt=full_system_prompt, 
-            temp=self.state_manager.get_temperature()
+            temp=0.85
         )
 
-    async def _self_reflection(self, user_msg: str, assistant_res: str, conv_id: str):
-        """Kinyeri a tényeket a válaszból és menti a jegyzettömbbe."""
+    async def _scribe_audit(self, user_msg: str, assistant_res: str, conv_id: str):
         try:
+            scribe_prompt = self.state_manager.get_scribe_prompt()
+            context = f"User: {user_msg}\nAssistant: {assistant_res}"
+            audit_json = await self.small_provider.generate_response(context, system_prompt=scribe_prompt, temp=0.1)
+            self.router_log.info(f"Scribe Audit: {audit_json}")
+            
+            reflection_prompt = "### TASK: EXTRACT TECHNICAL FACTS\nFORMAT: Topic: Value"
+            reflection = await self.small_provider.generate_response(context, system_prompt=reflection_prompt, temp=0.1)
+            
             model_name = self.state_manager.config["provider"]["model"]
-            reflection_prompt = (
-                "### TASK: EXTRACT TECHNICAL FACTS ONLY\n"
-                "Extract parameters, names, times, and hard facts from the conversation.\n"
-                "IGNORE metaphors, emotions, and filler.\n"
-                "FORMAT: Topic: Value\n"
-                "STRICT RULE: Only output the list. No intro."
-            )
-            context = f"User: {user_msg}\nAI: {assistant_res}"
-            
-            reflection = await self.router_provider.generate_response(context, system_prompt=reflection_prompt, temp=0.1)
-            
-            # Meglévő jegyzetek a duplikáció elkerüléséhez
-            past_notes = self.db.get_notes_for_conversation(conv_id)
-            existing_contents = [c.strip() for t, c in past_notes] if past_notes else []
-
             for line in reflection.split('\n'):
-                if ":" in line and len(line) > 5:
-                    clean_line = re.sub(r'^[* \-\d.]+', '', line)
-                    parts = clean_line.split(":", 1)
-                    
-                    if len(parts) == 2:
-                        topic_tag = parts[0].strip()[:50]
-                        content = parts[1].strip()
-
-                        if content not in existing_contents:
-                            self.db.add_short_term_note(
-                                conv_id=conv_id, 
-                                model_origin=model_name, 
-                                topic_tag=topic_tag, 
-                                content=content
-                            )
-                            existing_contents.append(content) 
-            
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    self.db.add_short_term_note(conv_id, model_name, parts[0].strip()[:50], parts[1].strip())
         except Exception as e:
-            self.log.error(f"Reflexió hiba: {e}")
+            self.log.error(f"Audit hiba: {e}")
 
     def _simple_combine(self, results):
         ctx = ""
-        for i, r in enumerate(results[:3]):
-            ctx += f"[{r['title']}]: {r['content']}\n"
-        return {"context": ctx, "source": "Web"}
+        for r in results[:3]:
+            ctx += f"[{r.get('title', 'Web')}]: {r.get('content', '')}\n"
+        return {"context": ctx}
 
     async def rerank_results(self, query: str, search_results: list):
         rag_cfg = self.state_manager.config.get("rag", {})
         threshold = rag_cfg.get("threshold", 0.15)
-        passed_contents = []
-        sources = []
-
-        for i, res in enumerate(search_results):
-            content = res.get('content', '')
-            title = res.get('title', 'Weboldal')
-            score = self.reranker.get_local_score(query, f"{title} {content}")
-            
-            if score >= threshold:
-                passed_contents.append(f"--- DOKUMENTUM {i+1} (Forrás: {title}) ---\n{content}")
-                sources.append(title)
-
-        if passed_contents:
-            return {
-                "context": "\n\n".join(passed_contents),
-                "source": ", ".join(list(set(sources)))
-            }
-        return None
+        passed = [f"Source: {res.get('title')}\n{res.get('content')}" 
+                  for res in search_results 
+                  if self.reranker.get_local_score(query, f"{res.get('title')} {res.get('content')}") >= threshold]
+        return {"context": "\n\n".join(passed)} if passed else None
