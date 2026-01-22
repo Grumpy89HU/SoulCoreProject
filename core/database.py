@@ -67,7 +67,27 @@ class DBManager:
                 reliability_index FLOAT DEFAULT 1.0,
                 source_conv_id TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )"""
+            )""", 
+            
+            # Belső monológok és "szívverés" napló
+            """CREATE TABLE IF NOT EXISTS internal_thought_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_model TEXT,
+                protocol_version TEXT,
+                raw_content TEXT,
+                priority_level INTEGER DEFAULT 0,
+                vram_usage REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            );""",
+            
+            # Rövid távú entitás-memória (emberek, IP-k, jelszavak, helyszínek)
+            """CREATE TABLE IF NOT EXISTS entity_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT, 
+                key_name TEXT UNIQUE,
+                value TEXT,
+                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+            );"""
         ]
         
         for table_cmd in tables:
@@ -153,3 +173,37 @@ class DBManager:
         else:
             query = "SELECT subject, predicate, object_detail FROM long_term_memory"
             return self._execute(query, fetch_all=True)
+            
+    def setup_soul_core_tables(self):
+        """Létrehozza a Vár mélyebb adatszerkezetét a központi végrehajtón keresztül."""
+        queries = [
+            # Belső monológok és "szívverés" napló
+            """CREATE TABLE IF NOT EXISTS internal_thought_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_model TEXT,
+                protocol_version TEXT,
+                raw_content TEXT,
+                priority_level INTEGER DEFAULT 0,
+                vram_usage REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            );""",
+            
+            # Rövid távú entitás-memória (emberek, IP-k, jelszavak, helyszínek)
+            """CREATE TABLE IF NOT EXISTS entity_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT, 
+                key_name TEXT UNIQUE,
+                value TEXT,
+                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+            );"""
+        ]
+        for q in queries:
+            self._execute(q, commit=True) # Itt a self._execute-ot használjuk!
+        self.log.info("SoulCore extra modulok (Internal Logs, Entity Memory) inicializálva.")
+
+    def add_detailed_log(self, model, protocol, content, priority, vram):
+        """Részletes belső naplózás a Heartbeat és az Írnok számára."""
+        query = """INSERT INTO internal_thought_logs 
+                   (source_model, protocol_version, raw_content, priority_level, vram_usage) 
+                   VALUES (?, ?, ?, ?, ?)"""
+        return self._execute(query, (model, protocol, content, priority, vram), commit=True)

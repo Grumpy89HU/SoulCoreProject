@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from core.kernel import Kernel
 from core.logger import get_logger
+from core.heartbeat import Heartbeat
 from core.ollama_core import discover_models_loop 
 from contextlib import asynccontextmanager
 
@@ -13,18 +14,30 @@ log = get_logger("api")
 # --- STARTUP & SHUTDOWN (LIFESPAN) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # STARTUP: Itt indul a háttérfolyamat
-    log.info("SoulCore API (Lifespan) indul... Háttérfolyamatok aktiválása.")
-    discovery_task = asyncio.create_task(discover_models_loop())
-    log.info("Ollama Discovery háttérfolyamat aktív.")
+    # STARTUP
+    log.info("SoulCore API indul... Háttérfolyamatok aktiválása.")
     
-    yield  # Itt fut az API kiszolgálása
+    # Ollama felfedező hurok
+    discovery_task = asyncio.create_task(discover_models_loop())
+    
+    # --- SZÍVVERÉS AKTIVÁLÁSA ---
+    # Átadjuk a kernel adatbázis-kezelőjét a heartbeatnek
+    heartbeat = Heartbeat(kernel.db) 
+    heartbeat_task = asyncio.create_task(heartbeat.start())
+    
+    log.info("Ollama Discovery és Heartbeat folyamatok aktívak.")
+    
+    yield  # Itt fut az API
 
-    # SHUTDOWN: Itt áll le tisztán minden
+    # SHUTDOWN
     log.info("Leállás... Háttérfolyamatok lezárása.")
     discovery_task.cancel()
+    
+    # Heartbeat leállítása
+    heartbeat.stop()
+    
     try:
-        await discovery_task
+        await asyncio.gather(discovery_task, return_exceptions=True)
     except asyncio.CancelledError:
         pass
 
