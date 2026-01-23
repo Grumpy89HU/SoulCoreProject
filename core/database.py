@@ -87,6 +87,27 @@ class DBManager:
                 key_name TEXT UNIQUE,
                 value TEXT,
                 last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+            )""",
+
+            # 8. Feladatütemező
+            # database.py - A Feladatütemező módosítása
+            """CREATE TABLE IF NOT EXISTS task_scheduler (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT,  -- <--- Ide kerül az OpenWebUI csevegés azonosítója
+                task_description TEXT,
+                priority INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'pending', 
+                scheduled_for TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""",
+            
+            # 9. Üzenetek naplózása és kézbesítése
+            """CREATE TABLE IF NOT EXISTS message (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             )"""
         ]
 
@@ -201,3 +222,25 @@ class DBManager:
         query = "SELECT results_json FROM search_cache WHERE query_hash = ? AND expires_at > datetime('now')"
         res = self._execute(query, (query_hash,))
         return json.loads(res[0]) if res else None
+        
+    def get_next_pending_task(self):
+        #Lekéri a következő végrehajtandó feladatot a hozzá tartozó chat_id-val.
+        query = """
+            SELECT id, chat_id, task_description, priority 
+            FROM task_scheduler 
+            WHERE status = 'pending' 
+            AND (scheduled_for <= datetime('now', 'localtime') OR scheduled_for IS NULL)
+            ORDER BY priority DESC LIMIT 1
+        """
+        return self._execute(query)
+
+    def update_task_status(self, task_id, status):
+        """Feladat állapotának frissítése (running, completed, failed)."""
+        return self._execute("UPDATE task_scheduler SET status = ? WHERE id = ?", (status, task_id), commit=True)
+
+    def get_internal_summary(self, limit=10):
+        """Összefoglalót készít a legutóbbi gondolatokból a belső monológ számára."""
+        query = "SELECT raw_content FROM internal_thought_logs ORDER BY timestamp DESC LIMIT ?"
+        results = self._execute(query, (limit,), fetch_all=True)
+        # Ha vannak eredmények, összefűzzük őket egy szöveggé
+        return "\n".join([r[0] for r in results]) if results else ""

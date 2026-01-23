@@ -1,5 +1,5 @@
 import uvicorn
-import os, sys, signal, time, traceback, json, asyncio
+import os, sys, signal, time, traceback, json, asyncio, hashlib
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +22,7 @@ async def lifespan(app: FastAPI):
     
     # --- SZÍVVERÉS AKTIVÁLÁSA ---
     # Átadjuk a kernel adatbázis-kezelőjét a heartbeatnek
-    heartbeat = Heartbeat(kernel.db) 
+    heartbeat = Heartbeat(kernel.db)
     heartbeat_task = asyncio.create_task(heartbeat.start())
     
     log.info("Ollama Discovery és Heartbeat folyamatok aktívak.")
@@ -32,8 +32,6 @@ async def lifespan(app: FastAPI):
     # SHUTDOWN
     log.info("Leállás... Háttérfolyamatok lezárása.")
     discovery_task.cancel()
-    
-    # Heartbeat leállítása
     heartbeat.stop()
     
     try:
@@ -53,6 +51,21 @@ app.add_middleware(
     allow_methods=["*"], 
     allow_headers=["*"]
 )
+
+# --- SEGÉDFÜGGVÉNYEK ---
+
+async def stream_generator(user_query: str, conv_id: str):
+    """Válaszok streamelése stabil session azonosítóval."""
+    full_response = await kernel.process_message(user_query, conv_id=conv_id)
+    chunk = {
+        "id": f"chatcmpl-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "lelek-core-v1",
+        "choices": [{"index": 0, "delta": {"content": full_response}, "finish_reason": None}]
+    }
+    yield f"data: {json.dumps(chunk)}\n\n"
+    yield "data: [DONE]\n\n"
 
 # --- ALAPVETŐ ÚTVONALAK ---
 
@@ -77,37 +90,47 @@ async def list_models():
 
 # --- CHAT COMPLETIONS ---
 
-async def stream_generator(user_query: str):
-    full_response = await kernel.process_message(user_query)
-    chunk = {
-        "id": f"chatcmpl-{int(time.time())}",
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": "lelek-core-v1",
-        "choices": [{"index": 0, "delta": {"content": full_response}, "finish_reason": None}]
-    }
-    yield f"data: {json.dumps(chunk)}\n\n"
-    yield "data: [DONE]\n\n"
-
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     try:
         body = await request.json()
+        
+        # --- INTELLIGENS ID KINYERÉS ÉS HASHING ---
+        # Megpróbáljuk kinyerni az ID-t a JSON-ból
+        raw_id = (
+            body.get("chat_id") or 
+            body.get("conversation_id") or 
+            body.get("id") or
+            (body.get("metadata", {}) if isinstance(body.get("metadata"), dict) else {}).get("chat_id")
+        )
+        
         messages = body.get("messages", [])
+        
+        # Ha nincs ID, az első üzenet tartalmából generálunk egy egyedi, stabil ujjlenyomatot
+        if (not raw_id or raw_id == "default_session") and messages:
+            seed = messages[0].get("content", "empty_seed")
+            conv_id = f"soul-{hashlib.md5(seed.encode()).hexdigest()[:12]}"
+        else:
+            conv_id = raw_id if raw_id else "default_session"
+        # ------------------------------------------
+
         stream_requested = body.get("stream", False)
         
+        # Utolsó felhasználói üzenet kinyerése
         user_query = ""
         for msg in reversed(messages):
             if msg["role"] == "user":
                 user_query = msg["content"]
                 break
 
-        log.info(f"Kérés: {user_query[:50]}... | Stream: {stream_requested}")
+        log.info(f"Kérés: {user_query[:50]}... | ID: {conv_id} | Stream: {stream_requested}")
 
         if stream_requested:
-            return StreamingResponse(stream_generator(user_query), media_type="text/event-stream")
+            return StreamingResponse(stream_generator(user_query, conv_id), media_type="text/event-stream")
 
-        response_text = await kernel.process_message(user_query)
+        # Nem streamelt válasz
+        response_text = await kernel.process_message(user_query, conv_id=conv_id)
+        
         return {
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
