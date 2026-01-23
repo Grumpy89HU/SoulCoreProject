@@ -10,7 +10,7 @@ class DBManager:
         self._init_db()
 
     def _execute(self, query, params=(), commit=False, fetch_all=False):
-        """Központi SQL végrehajtó. Csak itt érünk hozzá a sqlite3-hoz."""
+        """Központi SQL végrehajtó. Biztosítja a szálbiztos lezárást."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -27,10 +27,10 @@ class DBManager:
     def _init_db(self):
         """Minden tábla inicializálása - Origó központosított sémája."""
         tables = [
-            # Rendszer beállítások
-            "CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            # 1. RENDSZER BEÁLLÍTÁSOK
+            "CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, description TEXT)",
             
-            # Ollama modellek listája
+            # 2. Ollama modellek listája
             """CREATE TABLE IF NOT EXISTS ollama_models (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tag TEXT UNIQUE NOT NULL,
@@ -38,7 +38,7 @@ class DBManager:
                 last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
             )""",
 
-            # Keresési gyorsítótár
+            # 3. Keresési gyorsítótár
             """CREATE TABLE IF NOT EXISTS search_cache (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 query_hash TEXT UNIQUE NOT NULL,
@@ -47,7 +47,7 @@ class DBManager:
                 expires_at DATETIME
             )""",
 
-            # RÖVIDTÁVÚ MEMÓRIA (Ez válaszolt neked a szalonnáról!)
+            # 4. RÖVIDTÁVÚ MEMÓRIA
             """CREATE TABLE IF NOT EXISTS short_term_notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 conv_id TEXT NOT NULL,
@@ -58,7 +58,7 @@ class DBManager:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )""",
 
-            # HOSSZÚTÁVÚ MEMÓRIA (Tények, amik sosem évülnek el)
+            # 5. HOSSZÚTÁVÚ MEMÓRIA (Tények)
             """CREATE TABLE IF NOT EXISTS long_term_memory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subject TEXT NOT NULL,
@@ -69,7 +69,7 @@ class DBManager:
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )""", 
             
-            # Belső monológok és "szívverés" napló
+            # 6. Belső monológok és "szívverés" napló
             """CREATE TABLE IF NOT EXISTS internal_thought_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_model TEXT,
@@ -78,132 +78,126 @@ class DBManager:
                 priority_level INTEGER DEFAULT 0,
                 vram_usage REAL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            );""",
+            )""",
             
-            # Rövid távú entitás-memória (emberek, IP-k, jelszavak, helyszínek)
+            # 7. Entitás-memória (emberek, IP-k, jelszavak)
             """CREATE TABLE IF NOT EXISTS entity_memory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 entity_type TEXT, 
                 key_name TEXT UNIQUE,
                 value TEXT,
                 last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-            );"""
+            )"""
         ]
+
+        for table_sql in tables:
+            self._execute(table_sql, commit=True)
+
+        # --- FREEDOM MODE FIX ---
+        # Ellenőrizzük, hogy létezik-e a bejegyzés. Ha nem, beszúrjuk.
+        existing = self.get_setting("freedom_mode")
+        if existing is None:
+            self._execute("""
+                INSERT INTO system_settings (key, value, description) 
+                VALUES ('freedom_mode', 'false', 'Global freedom mode: if true, AI remembers past sessions.')
+            """, commit=True)
+            self.log.info("Freedom Mode alapértelmezés (false) beállítva.")
         
-        for table_cmd in tables:
-            self._execute(table_cmd, commit=True)
-            
-        self.log.info("SoulCore Adatbázis (DAL) minden táblája aktív.")
+        self.log.info("SoulCore adatbázis sémák ellenőrizve.")
 
-    # --- PUBLIKUS METÓDUSOK (Ezeket hívja a Kernel és a többi modul) ---
+    # --- KÉNYELMI FUNKCIÓK A TESZTELÉSHEZ ---
 
-    def set_config(self, key, value):
-        query = "INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)"
-        return self._execute(query, (key, str(value)), commit=True)
+    def toggle_freedom_mode(self, state: bool):
+        """Gyors kapcsoló a Freedom Mode-hoz (True/False)."""
+        value = "true" if state else "false"
+        self.set_setting("freedom_mode", value)
+        self.log.info(f"Freedom Mode átkapcsolva: {value.upper()}")
 
-    def get_config(self, key, default=None):
-        query = "SELECT value FROM system_settings WHERE key = ?"
-        res = self._execute(query, (key,))
+    def is_freedom_enabled(self) -> bool:
+        """Lekéri a Freedom Mode aktuális állapotát bulyanként."""
+        val = self.get_setting("freedom_mode", "false")
+        return val.lower() == "true"
+
+    # --- RENDSZER BEÁLLÍTÁSOK (CONFIG) ---
+
+    def get_setting(self, key, default=None):
+        res = self._execute("SELECT value FROM system_settings WHERE key = ?", (key,))
         return res[0] if res else default
+
+    def set_setting(self, key, value):
+        return self._execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)", (key, str(value)), commit=True)
+
+    # --- RÖVIDTÁVÚ MEMÓRIA (SHORT TERM) ---
 
     def add_short_term_note(self, conv_id, model_origin, topic_tag, content, importance=0.5):
         query = """
             INSERT INTO short_term_notes (conv_id, model_origin, topic_tag, content, importance_score)
             VALUES (?, ?, ?, ?, ?)
         """
-        self._execute(query, (conv_id, model_origin, topic_tag, content, importance), commit=True)
-        self.log.info(f"Jegyzet rögzítve: {topic_tag}")
+        return self._execute(query, (conv_id, model_origin, topic_tag, content, importance), commit=True)
 
-    def get_notes_for_model(self, conv_id, model_origin):
-        query = "SELECT topic_tag, content FROM short_term_notes WHERE conv_id = ? AND model_origin = ?"
-        return self._execute(query, (conv_id, model_origin), fetch_all=True)
+    def get_notes_by_model(self, model_name, limit=5):
+        query = """
+            SELECT topic_tag, content FROM short_term_notes 
+            WHERE model_origin = ? 
+            ORDER BY created_at DESC LIMIT ?
+        """
+        return self._execute(query, (model_name, limit), fetch_all=True)
 
-    def delete_note_by_id(self, note_id):
-        """Példa: törlés megvalósítása."""
-        query = "DELETE FROM short_term_notes WHERE id = ?"
-        return self._execute(query, (note_id,), commit=True)
+    def get_notes_for_conversation(self, conv_id):
+        query = "SELECT topic_tag, content FROM short_term_notes WHERE conv_id = ?"
+        return self._execute(query, (conv_id,), fetch_all=True)
 
     def clear_short_term_memory(self, conv_id):
-        """Mindent töröl egy adott beszélgetéshez."""
-        query = "DELETE FROM short_term_notes WHERE conv_id = ?"
-        return self._execute(query, (conv_id,), commit=True)
-    
-    def update_ollama_model(self, tag, size):
-        """Ollama modellek frissítése kívülről érkező SQL nélkül."""
-        query = """
-            INSERT OR REPLACE INTO ollama_models (tag, size_bytes, last_seen)
-            VALUES (?, ?, datetime('now'))
-        """
-        return self._execute(query, (tag, size), commit=True)
-        
-    # --- SEARCH CACHE MŰVELETEK ---
+        return self._execute("DELETE FROM short_term_notes WHERE conv_id = ?", (conv_id,), commit=True)
 
-    def get_cached_search(self, query_hash):
-        """Keresési cache lekérése (SQL bezárva)."""
-        query = "SELECT results_json FROM search_cache WHERE query_hash = ? AND expires_at > datetime('now')"
-        res = self._execute(query, (query_hash,))
-        if res:
-            return json.loads(res[0])
-        return None
+    # --- HOSSZÚTÁVÚ MEMÓRIA (LONG TERM) ---
+
+    def get_long_term_memories(self, subject=None):
+        if subject:
+            query = "SELECT subject, predicate, object_detail FROM long_term_memory WHERE subject LIKE ?"
+            return self._execute(query, (f"%{subject}%",), fetch_all=True)
+        return self._execute("SELECT subject, predicate, object_detail FROM long_term_memory", fetch_all=True)
+
+    # --- ENTITÁS MEMÓRIA (A Scribe használja) ---
+
+    def update_entity_memory(self, entity_type, key_name, value):
+        query = """
+            INSERT INTO entity_memory (entity_type, key_name, value, last_updated)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key_name) DO UPDATE SET 
+                value = excluded.value,
+                last_updated = CURRENT_TIMESTAMP
+        """
+        return self._execute(query, (entity_type, key_name, value), commit=True)
+
+    def get_entity_value(self, key_name):
+        res = self._execute("SELECT value FROM entity_memory WHERE key_name = ?", (key_name,))
+        return res[0] if res else None
+
+    # --- BELSŐ NAPLÓZÁS (THOUGHT LOGS) ---
+
+    def add_detailed_log(self, model, protocol, content, priority=0, vram=0.0):
+        query = """
+            INSERT INTO internal_thought_logs (source_model, protocol_version, raw_content, priority_level, vram_usage) 
+            VALUES (?, ?, ?, ?, ?)
+        """
+        return self._execute(query, (model, protocol, content, priority, vram), commit=True)
+
+    # --- EGYÉB FUNKCIÓK ---
+
+    def update_ollama_model(self, tag, size):
+        query = "INSERT OR REPLACE INTO ollama_models (tag, size_bytes, last_seen) VALUES (?, ?, datetime('now'))"
+        return self._execute(query, (tag, size), commit=True)
 
     def save_search_to_cache(self, query_hash, raw_query, results_json, hours=12):
-        """Keresési eredmény mentése a cache-be."""
         query = """
             INSERT OR REPLACE INTO search_cache (query_hash, raw_query, results_json, expires_at)
             VALUES (?, ?, ?, datetime('now', ?))
         """
         return self._execute(query, (query_hash, raw_query, results_json, f'+{hours} hours'), commit=True)
-    
-    def get_notes_for_conversation(self, conv_id):
-        """
-        Kizárólag az adott beszélgetéshez tartozó jegyzeteket adja vissza.
-        Így az új beszélgetés (új conv_id) tiszta lappal indul.
-        """
-        query = "SELECT topic_tag, content FROM short_term_notes WHERE conv_id = ?"
-        # Itt nem szűrünk modellre, mert minden 'al-én' láthatja a közös jegyzetet az adott szálon
-        return self._execute(query, (conv_id,), fetch_all=True)
 
-    def get_long_term_memories(self, subject=None):
-        """
-        Hosszútávú tények lekérése, amik minden beszélgetésnél relevánsak lehetnek.
-        """
-        if subject:
-            query = "SELECT subject, predicate, object_detail FROM long_term_memory WHERE subject LIKE ?"
-            return self._execute(query, (f"%{subject}%",), fetch_all=True)
-        else:
-            query = "SELECT subject, predicate, object_detail FROM long_term_memory"
-            return self._execute(query, fetch_all=True)
-            
-    def setup_soul_core_tables(self):
-        """Létrehozza a Vár mélyebb adatszerkezetét a központi végrehajtón keresztül."""
-        queries = [
-            # Belső monológok és "szívverés" napló
-            """CREATE TABLE IF NOT EXISTS internal_thought_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_model TEXT,
-                protocol_version TEXT,
-                raw_content TEXT,
-                priority_level INTEGER DEFAULT 0,
-                vram_usage REAL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            );""",
-            
-            # Rövid távú entitás-memória (emberek, IP-k, jelszavak, helyszínek)
-            """CREATE TABLE IF NOT EXISTS entity_memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entity_type TEXT, 
-                key_name TEXT UNIQUE,
-                value TEXT,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-            );"""
-        ]
-        for q in queries:
-            self._execute(q, commit=True) # Itt a self._execute-ot használjuk!
-        self.log.info("SoulCore extra modulok (Internal Logs, Entity Memory) inicializálva.")
-
-    def add_detailed_log(self, model, protocol, content, priority, vram):
-        """Részletes belső naplózás a Heartbeat és az Írnok számára."""
-        query = """INSERT INTO internal_thought_logs 
-                   (source_model, protocol_version, raw_content, priority_level, vram_usage) 
-                   VALUES (?, ?, ?, ?, ?)"""
-        return self._execute(query, (model, protocol, content, priority, vram), commit=True)
+    def get_cached_search(self, query_hash):
+        query = "SELECT results_json FROM search_cache WHERE query_hash = ? AND expires_at > datetime('now')"
+        res = self._execute(query, (query_hash,))
+        return json.loads(res[0]) if res else None
