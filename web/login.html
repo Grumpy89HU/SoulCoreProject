@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SoulCore 2.0 - Hitelesítés</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { 
+            background-color: #0d1117; 
+            color: #c9d1d9; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+        /* Finom háttér-animáció a mélységérzethez */
+        .bg-mesh {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background-image: radial-gradient(circle at 50% 50%, #161b22 0%, #0d1117 100%);
+            z-index: -1;
+        }
+        .login-card { 
+            background: rgba(22, 27, 34, 0.95); 
+            border: 1px solid #30363d; 
+            box-shadow: 0 0 80px rgba(0,0,0,0.6);
+            backdrop-filter: blur(10px);
+        }
+        .input-field { 
+            background: #0d1117; 
+            border: 1px solid #30363d; 
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+        }
+        .input-field:focus { 
+            border-color: #3b82f6; 
+            box-shadow: 0 0 15px rgba(59, 130, 246, 0.15); 
+            outline: none; 
+            transform: translateY(-1px);
+        }
+        .glitch { animation: pulse 3s infinite; }
+        @keyframes pulse { 0% { opacity: 1; filter: brightness(1); } 50% { opacity: 0.8; filter: brightness(1.2); } 100% { opacity: 1; filter: brightness(1); } }
+        
+        /* Gomb töltés animáció */
+        .loader {
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #3b82f6;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="h-screen flex items-center justify-center">
+    <div class="bg-mesh"></div>
+
+    <div class="login-card p-10 rounded-2xl w-full max-w-md transition-all duration-500 hover:border-blue-900/50">
+        <div class="text-center mb-10">
+            <div class="inline-block p-3 rounded-full bg-blue-600/10 mb-4 border border-blue-500/20">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+            </div>
+            <h1 class="text-3xl font-bold tracking-tighter text-blue-500 glitch">SOULCORE 2.0</h1>
+            <p class="text-[10px] text-gray-500 uppercase tracking-[0.3em] mt-2 font-mono">Szuverén Adatkezelési Kapu</p>
+        </div>
+
+        <form id="login-form" class="space-y-6">
+            <div>
+                <label class="text-[10px] text-gray-500 uppercase font-bold ml-1 tracking-wider">Azonosító</label>
+                <input type="text" id="username" required 
+                    class="w-full input-field rounded-lg py-3 px-4 mt-1 text-sm text-gray-200" 
+                    placeholder="Admin neve..." autocomplete="username">
+            </div>
+            <div>
+                <label class="text-[10px] text-gray-500 uppercase font-bold ml-1 tracking-wider">Kulcsszó</label>
+                <input type="password" id="password" required 
+                    class="w-full input-field rounded-lg py-3 px-4 mt-1 text-sm text-gray-200" 
+                    placeholder="••••••••" autocomplete="current-password">
+            </div>
+            
+            <div id="error-msg" class="hidden bg-red-900/10 border border-red-500/20 py-2 rounded-lg text-red-500 text-[10px] text-center uppercase font-bold animate-pulse">
+                🛑 Hozzáférés megtagadva: Érvénytelen kulcs
+            </div>
+
+            <button type="submit" id="submit-btn"
+                class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg transition-all shadow-lg shadow-blue-900/20 active:scale-[0.98]">
+                <span id="btn-text">BELÉPÉS A RENDSZERBE</span>
+            </button>
+        </form>
+
+        <div class="mt-8 pt-6 border-t border-gray-800 flex justify-between items-center">
+            <p class="text-[9px] text-gray-600 font-mono tracking-tighter uppercase">Protocol: Secure-RAG-2026</p>
+            <p class="text-[9px] text-gray-600 font-mono">STATUS: <span class="text-green-600">ONLINE</span></p>
+        </div>
+    </div>
+
+    <script>
+        const loginForm = document.getElementById('login-form');
+        const submitBtn = document.getElementById('submit-btn');
+        const btnText = document.getElementById('btn-text');
+        const errorMsg = document.getElementById('error-msg');
+
+        loginForm.onsubmit = async (e) => {
+            e.preventDefault();
+            
+            // Vizualis visszacsatolás: betöltés indítása
+            errorMsg.classList.add('hidden');
+            submitBtn.disabled = true;
+            btnText.innerHTML = '<span class="loader"></span> HITELESÍTÉS...';
+
+            try {
+                const res = await fetch('/login', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        username: document.getElementById('username').value,
+                        password: document.getElementById('password').value
+                    })
+                });
+
+                if (res.ok) {
+                    btnText.innerText = "SIKERES BELÉPÉS";
+                    submitBtn.classList.replace('bg-blue-600', 'bg-green-600');
+                    setTimeout(() => { window.location.href = "/"; }, 500);
+                } else {
+                    throw new Error("Unauthorized");
+                }
+            } catch (err) {
+                errorMsg.classList.remove('hidden');
+                submitBtn.disabled = false;
+                btnText.innerText = "BELÉPÉS A RENDSZERBE";
+            }
+        };
+    </script>
+</body>
+</html>
